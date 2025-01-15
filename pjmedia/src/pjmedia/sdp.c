@@ -572,6 +572,21 @@ PJ_DEF(pjmedia_sdp_attr*) pjmedia_sdp_attr_create_ssrc( pj_pool_t *pool,
 }
 
 
+PJ_DEF(pjmedia_sdp_attr*) pjmedia_sdp_attr_create_label(pj_pool_t *pool,
+                                                const pj_str_t *label_str)
+{
+    pjmedia_sdp_attr *attr;
+    
+    attr = PJ_POOL_ZALLOC_T(pool, pjmedia_sdp_attr);
+    attr->name = pj_str("label");
+    attr->value.ptr = (char *)pj_pool_alloc(pool, label_str->slen);
+    pj_memcpy(attr->value.ptr, label_str->ptr, label_str->slen);
+    attr->value.slen = label_str->slen;
+
+    return attr;
+}
+
+
 PJ_DEF(pj_status_t) pjmedia_sdp_attr_to_rtpmap(pj_pool_t *pool,
                                                const pjmedia_sdp_attr *attr,
                                                pjmedia_sdp_rtpmap **p_rtpmap)
@@ -597,8 +612,8 @@ PJ_DEF(pj_status_t) pjmedia_sdp_rtpmap_to_attr(pj_pool_t *pool,
     PJ_ASSERT_RETURN(pool && rtpmap && p_attr, PJ_EINVAL);
 
     /* Check that mandatory attributes are specified. */
-    PJ_ASSERT_RETURN(rtpmap->enc_name.slen && rtpmap->clock_rate,
-                     PJMEDIA_SDP_EINRTPMAP);
+    PJ_ASSERT_RETURN(rtpmap->pt.slen && rtpmap->enc_name.slen &&
+                     rtpmap->clock_rate, PJMEDIA_SDP_EINRTPMAP);
 
 
     attr = PJ_POOL_ALLOC_T(pool, pjmedia_sdp_attr);
@@ -617,7 +632,7 @@ PJ_DEF(pj_status_t) pjmedia_sdp_rtpmap_to_attr(pj_pool_t *pool,
                            rtpmap->clock_rate,
                            (rtpmap->param.slen ? "/" : ""),
                            (int)rtpmap->param.slen,
-                           rtpmap->param.ptr);
+                           rtpmap->param.slen ? rtpmap->param.ptr : "");
 
     if (len < 1 || len >= (int)sizeof(tempbuf))
         return PJMEDIA_SDP_ERTPMAPTOOLONG;
@@ -796,7 +811,13 @@ static int print_media_desc(const pjmedia_sdp_media *m, char *buf, pj_size_t len
 PJ_DEF(int) pjmedia_sdp_media_print(const pjmedia_sdp_media *media,
                                char *buf, pj_size_t size)
 {
-        return print_media_desc(media, buf, size);
+    return print_media_desc(media, buf, size);
+}
+
+PJ_DEF(int) pjmedia_sdp_attr_print(const pjmedia_sdp_attr *attr,
+                               char *buf, pj_size_t size)
+{
+    return (int)print_attr(attr, buf, size);
 }
 
 PJ_DEF(pjmedia_sdp_media*) pjmedia_sdp_media_clone(
@@ -889,9 +910,11 @@ static int print_session(const pjmedia_sdp_session *ses,
     int printed;
 
     /* Check length for v= and o= lines. */
-    if (len < 5+ 
-              2+ses->origin.user.slen+18+
-              ses->origin.net_type.slen+ses->origin.addr.slen + 2)
+    if (len < 5 + 2 + ses->origin.user.slen +
+              20 + 20 + 3 + /* max digits of origin.id and version +
+                             * whitespaces */
+              ses->origin.net_type.slen + ses->origin.addr_type.slen +
+              ses->origin.addr.slen + 2 + 2)
     {
         return -1;
     }
@@ -906,10 +929,10 @@ static int print_session(const pjmedia_sdp_session *ses,
     pj_memcpy(p, ses->origin.user.ptr, ses->origin.user.slen);
     p += ses->origin.user.slen;
     *p++ = ' ';
-    printed = pj_utoa(ses->origin.id, p);
+    printed = pj_utoa2(ses->origin.id, p);
     p += printed;
     *p++ = ' ';
-    printed = pj_utoa(ses->origin.version, p);
+    printed = pj_utoa2(ses->origin.version, p);
     p += printed;
     *p++ = ' ';
     pj_memcpy(p, ses->origin.net_type.ptr, ses->origin.net_type.slen);
@@ -953,15 +976,15 @@ static int print_session(const pjmedia_sdp_session *ses,
     }
 
     /* Time */
-    if ((end-p) < 24) {
+    if ((end-p) < 2+20+1+20+2) {
         return -1;
     }
     *p++ = 't';
     *p++ = '=';
-    printed = pj_utoa(ses->time.start, p);
+    printed = pj_utoa2(ses->time.start, p);
     p += printed;
     *p++ = ' ';
-    printed = pj_utoa(ses->time.stop, p);
+    printed = pj_utoa2(ses->time.stop, p);
     p += printed;
     *p++ = '\r';
     *p++ = '\n';
@@ -1016,7 +1039,7 @@ static void parse_origin(pj_scanner *scanner, pjmedia_sdp_session *ses,
                          volatile parse_context *ctx)
 {
     pj_str_t str;
-    unsigned long ul;
+    pj_uint_t ui;
 
     ctx->last_error = PJMEDIA_SDP_EINORIGIN;
 
@@ -1035,20 +1058,20 @@ static void parse_origin(pj_scanner *scanner, pjmedia_sdp_session *ses,
 
     /* id */
     pj_scan_get_until_ch(scanner, ' ', &str);
-    if (pj_strtoul3(&str, &ul, 10) != PJ_SUCCESS){
+    if (pj_strtoul4(&str, &ui, 10) != PJ_SUCCESS){
         on_scanner_error(scanner);
         return;
     }
-    ses->origin.id = (pj_uint32_t)ul;
+    ses->origin.id = (pj_uint_t)ui;
     pj_scan_get_char(scanner);
 
     /* version */
     pj_scan_get_until_ch(scanner, ' ', &str);
-    if (pj_strtoul3(&str, &ul, 10) != PJ_SUCCESS){
+    if (pj_strtoul4(&str, &ui, 10) != PJ_SUCCESS){
         on_scanner_error(scanner);
         return;
     }
-    ses->origin.version = (pj_uint32_t)ul;
+    ses->origin.version = (pj_uint_t)ui;
     pj_scan_get_char(scanner);
 
     /* network-type */
@@ -1071,7 +1094,7 @@ static void parse_time(pj_scanner *scanner, pjmedia_sdp_session *ses,
                        volatile parse_context *ctx)
 {
     pj_str_t str;
-    unsigned long ul;
+    pj_uint_t ui;
 
     ctx->last_error = PJMEDIA_SDP_EINTIME;
 
@@ -1086,21 +1109,21 @@ static void parse_time(pj_scanner *scanner, pjmedia_sdp_session *ses,
 
     /* start time */
     pj_scan_get_until_ch(scanner, ' ', &str);
-    if (pj_strtoul3(&str, &ul, 10) != PJ_SUCCESS){
+    if (pj_strtoul4(&str, &ui, 10) != PJ_SUCCESS){
         on_scanner_error(scanner);
         return;
     }
-    ses->time.start = (pj_uint32_t)ul;
+    ses->time.start = (pj_uint_t)ui;
 
     pj_scan_get_char(scanner);
 
     /* stop time */
     pj_scan_get_until_chr(scanner, " \t\r\n", &str);
-    if (pj_strtoul3(&str, &ul, 10) != PJ_SUCCESS){
+    if (pj_strtoul4(&str, &ui, 10) != PJ_SUCCESS){
         on_scanner_error(scanner);
         return;
     }
-    ses->time.stop = (pj_uint32_t)ul;
+    ses->time.stop = (pj_uint_t)ui;
 
     /* We've got what we're looking for, skip anything until newline */
     pj_scan_skip_line(scanner);
@@ -1145,7 +1168,28 @@ static void parse_connection_info(pj_scanner *scanner, pjmedia_sdp_conn *conn,
 
     /* address. */
     pj_scan_get_until_chr(scanner, "/ \t\r\n", &conn->addr);
-    PJ_TODO(PARSE_SDP_CONN_ADDRESS_SUBFIELDS);
+    /* Parse multicast details, if any. */
+    if (*scanner->curptr == '/') {
+        pj_str_t str;
+        unsigned long ul;
+
+        pj_scan_get_until_chr(scanner, "/ \t\r\n", &str);
+        if (*scanner->curptr == '/') {
+            if ((pj_strtoul3(&str, &ul, 10) != PJ_SUCCESS) || ul > 255) {
+                on_scanner_error(scanner);
+                return;
+            }
+
+            conn->ttl = (pj_uint8_t)ul;
+        }        
+
+        if ((pj_strtoul3(&str, &ul, 10) != PJ_SUCCESS) || ul > 255) {
+            on_scanner_error(scanner);
+            return;
+        }
+        conn->no_addr = (pj_uint8_t)ul;
+
+    }
 
     /* We've got what we're looking for, skip anything until newline */
     pj_scan_skip_line(scanner);
@@ -1505,7 +1549,7 @@ PJ_DEF(pj_status_t) pjmedia_sdp_parse( pj_pool_t *pool,
 
         session = NULL;
 
-        pj_assert(ctx.last_error != PJ_SUCCESS);
+        // pj_assert(ctx.last_error != PJ_SUCCESS);
     }
     PJ_END;
 
@@ -1743,7 +1787,7 @@ PJ_DEF(pj_uint32_t) pjmedia_sdp_transport_get_proto(const pj_str_t *tp)
     PJ_ASSERT_RETURN(tp, PJMEDIA_TP_PROTO_NONE);
 
     idx = pj_strtok2(tp, "/", &token, 0);
-    if (idx != tp->slen)
+    if ((idx != tp->slen) && (tp->slen != token.slen))
         pj_strset(&rest, tp->ptr + token.slen + 1, tp->slen - token.slen - 1);
 
     if (pj_stricmp2(&token, "RTP") == 0) {
